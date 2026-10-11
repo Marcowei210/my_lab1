@@ -1,0 +1,47 @@
+{
+  "mode": "flood",
+  "ping_count": 6,
+  "ping_loss_pct": 0,
+  "rtt_ms": [
+    0.849,
+    0.652,
+    1.04,
+    1.28,
+    0.307,
+    0.286
+  ],
+  "first_rtt_ratio": 1.3021472392638036,
+  "leak_to_h3": 12,
+  "first_packet_leaked": true,
+  "openflow_flows": 1,
+  "fdb_entries": 0,
+  "dst_mapping": {},
+  "dst_mapping_truth": {
+    "00:00:00:00:00:01": 1,
+    "00:00:00:00:00:02": 2,
+    "00:00:00:00:00:03": 3
+  },
+  "dst_mapping_correct": false,
+  "packet_ins": 0,
+  "catchall_flows": [
+    "cookie=0x0, duration=4.044s, table=0, n_packets=14, n_bytes=1260, priority=0 actions=FLOOD"
+  ],
+  "controller_connected": false,
+  "flows_dump": [
+    "cookie=0x0, duration=4.044s, table=0, n_packets=14, n_bytes=1260, priority=0 actions=FLOOD"
+  ],
+  "h3_capture_lines": [
+    "15:38:14.683022 IP 10.0.0.1 > 10.0.0.2: ICMP echo request, id 4675, seq 1, length 64",
+    "15:38:14.683207 IP 10.0.0.2 > 10.0.0.1: ICMP echo reply, id 4675, seq 1, length 64",
+    "15:38:14.884102 IP 10.0.0.1 > 10.0.0.2: ICMP echo request, id 4675, seq 2, length 64",
+    "15:38:14.884543 IP 10.0.0.2 > 10.0.0.1: ICMP echo reply, id 4675, seq 2, length 64",
+    "15:38:15.092506 IP 10.0.0.1 > 10.0.0.2: ICMP echo request, id 4675, seq 3, length 64",
+    "15:38:15.093265 IP 10.0.0.2 > 10.0.0.1: ICMP echo reply, id 4675, seq 3, length 64",
+    "15:38:15.293235 IP 10.0.0.1 > 10.0.0.2: ICMP echo request, id 4675, seq 4, length 64",
+    "15:38:15.294229 IP 10.0.0.2 > 10.0.0.1: ICMP echo reply, id 4675, seq 4, length 64",
+    "15:38:15.493547 IP 10.0.0.1 > 10.0.0.2: ICMP echo request, id 4675, seq 5, length 64",
+    "15:38:15.493746 IP 10.0.0.2 > 10.0.0.1: ICMP echo reply, id 4675, seq 5, length 64",
+    "15:38:15.699837 IP 10.0.0.1 > 10.0.0.2: ICMP echo request, id 4675, seq 6, length 64",
+    "15:38:15.700250 IP 10.0.0.2 > 10.0.0.1: ICMP echo reply, id 4675, seq 6, length 64"
+  ]
+}

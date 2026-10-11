@@ -29,7 +29,7 @@ def capture_filter():
     The filter must capture that conversation and nothing else (no ICMP from
     the hosts, no ARP). `man pcap-filter` has the syntax.
     """
-    raise NotImplementedError("TODO A0 -- read the docstring above capture_filter()")
+    return "lo", "tcp port 6653"
 
 
 def flood(s1):
@@ -37,7 +37,8 @@ def flood(s1):
 
     Install a single rule that matches everything and floods.
     """
-    raise NotImplementedError("TODO A1 -- read the docstring above flood()")
+    ofctl(s1, "add-flow", "priority=0,actions=FLOOD")
+
 
 
 def normal(s1):
@@ -47,7 +48,8 @@ def normal(s1):
     L2 pipeline. Afterwards look at `ovs-appctl fdb/show s1`: that table is
     where the learned state lives -- not in the OpenFlow table.
     """
-    raise NotImplementedError("TODO A2 -- read the docstring above normal()")
+    # raise NotImplementedError("TODO A2 -- read the docstring above normal()")
+    ofctl(s1, "add-flow", "priority=0,actions=NORMAL")
 
 
 def proactive(s1, hosts):
@@ -59,4 +61,7 @@ def proactive(s1, hosts):
     table still cannot handle -- the very first thing a host does before it can
     send an IP packet is not addressed to any of those MACs. Add a rule for it.
     """
-    raise NotImplementedError("TODO A4 -- read the docstring above proactive()")
+    # raise NotImplementedError("TODO A4 -- read the docstring above proactive()")
+    for mac, port in hosts:
+        ofctl(s1, "add-flow", "priority=10,dl_dst=%s,actions=output:%d" % (mac, port))
+    ofctl(s1, "add-flow", "priority=5,arp,dl_dst=ff:ff:ff:ff:ff:ff,actions=FLOOD")

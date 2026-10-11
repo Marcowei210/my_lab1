@@ -41,6 +41,8 @@ OFPT_HELLO, OFPT_ERROR, OFPT_ECHO_REQUEST, OFPT_ECHO_REPLY = 0, 1, 2, 3
 OFPT_FEATURES_REQUEST, OFPT_FEATURES_REPLY = 5, 6
 OFPT_PACKET_IN, OFPT_FLOW_REMOVED, OFPT_PORT_STATUS = 10, 11, 12
 OFPT_PACKET_OUT, OFPT_FLOW_MOD = 13, 14
+OFPT_MULTIPART_REQUEST, OFPT_MULTIPART_REPLY = 18, 19
+OFPMP_PORT_DESC = 13
 TYPE_NAMES = {0: "HELLO", 1: "ERROR", 2: "ECHO_REQUEST", 3: "ECHO_REPLY",
               5: "FEATURES_REQUEST", 6: "FEATURES_REPLY",
               10: "PACKET_IN", 13: "PACKET_OUT", 14: "FLOW_MOD"}
@@ -196,6 +198,13 @@ class SPController:
         self.num_switches = num_switches
         self.switches = {}            # {sock_fd: Switch}
         self.dpid_to_sw = {}          # {dpid: Switch}
+        self.ports = {}
+        self.links = {}
+        self.hosts = {}
+        self.pending = collections.deque(maxlen=128)
+        self.port_parts = {}
+        self.ready = False
+        self.last_probe = 0.0
 
     # ---- select() loop + handshake (given) --------------------------------
 
@@ -208,6 +217,7 @@ class SPController:
 
         read_socks = [srv]
         while True:
+            self.discovery_tick()
             readable, _, _ = select.select(read_socks, [], [], 1.0)
             for sock in readable:
                 if sock is srv:
@@ -230,6 +240,7 @@ class SPController:
                         self.switches.pop(sock.fileno(), None)
                         if self.dpid_to_sw.get(sw.dpid) is sw:
                             del self.dpid_to_sw[sw.dpid]
+                            self.forget_switch(sw.dpid)
                         sock.close()
 
     def _dispatch(self, sw, msg_type, xid, body):
@@ -245,6 +256,8 @@ class SPController:
             self.on_switch_ready(sw)
         elif msg_type == OFPT_PACKET_IN:
             self.on_packet_in(sw, xid, body)
+        elif msg_type == OFPT_MULTIPART_REPLY:
+            self.on_port_description(sw, xid, body)
         elif msg_type == OFPT_ERROR:
             log.error("switch %s: %s", sw.dpid_hex(), decode_error(body))
 
@@ -255,14 +268,208 @@ class SPController:
 
         You decide what to do here.
         """
-        pass
+        self.forget_switch(sw.dpid)
+        sw.send(OFPT_FLOW_MOD, build_flow_mod(
+            0, {}, OFPP_CONTROLLER, max_len=OFPCML_NO_BUFFER))
+        miss = build_flow_mod(0, {}, OFPP_CONTROLLER, max_len=OFPCML_NO_BUFFER)
+        sw.send(OFPT_FLOW_MOD, miss[:16] + b"\x01" + miss[17:])
+        sw.send(OFPT_FLOW_MOD, build_flow_mod(
+            100, {OXM_OF_ETH_TYPE: struct.pack("!H", ETH_TYPE_LLDP)},
+            OFPP_CONTROLLER, max_len=OFPCML_NO_BUFFER))
+        xid = sw.next_xid()
+        self.port_parts[sw.dpid] = (xid, {})
+        sw.send(OFPT_MULTIPART_REQUEST, struct.pack("!HH4x", OFPMP_PORT_DESC, 0), xid=xid)
 
     def on_packet_in(self, sw, xid, body):
         """Called when a switch sends a PACKET_IN.
 
         You decide what to do here.
         """
-        pass
+        if len(body) < 20:
+            raise ValueError("truncated PACKET_IN")
+        buffer_id, in_port, frame = parse_packet_in(body)
+        if len(frame) < 14:
+            return
+        dst, src, ethertype = parse_ethernet(frame)
+        if ethertype == ETH_TYPE_LLDP:
+            origin = self.parse_lldp(frame)
+            if origin is not None:
+                peer, peer_port = origin
+                if (peer != sw.dpid and peer in self.ports
+                        and peer_port in self.ports[peer]
+                        and in_port in self.ports.get(sw.dpid, {})):
+                    self.links[(sw.dpid, in_port)] = (peer, peer_port)
+                    self.check_topology()
+            return
+        if not self.ready:
+            return
+        if in_port not in self.ports.get(sw.dpid, {}):
+            return
+        if (sw.dpid, in_port) not in self.links:
+            if frame[6] & 1 or src == "00:00:00:00:00:00":
+                return
+            location = (sw.dpid, in_port)
+            if self.hosts.get(src) != location:
+                self.hosts[src] = location
+                self.install_gate(sw, {OXM_OF_IN_PORT: in_port, OXM_OF_ETH_SRC: src})
+                self.install_destination(src)
+                self.flush_pending(src)
+                log.info("host %s at %016x/%d", src, *location)
+        if frame[0] & 1:
+            if (sw.dpid, in_port) in self.links:
+                return
+            for dpid, ports in self.ports.items():
+                for port in ports:
+                    if (dpid, port) not in self.links and (dpid, port) != (sw.dpid, in_port):
+                        self.emit_to_host(dpid, port, frame)
+        elif dst in self.hosts:
+            dpid, port = self.hosts[dst]
+            if (dpid, port) != (sw.dpid, in_port):
+                self.emit_to_host(dpid, port, frame)
+        else:
+            self.pending.append((time.monotonic(), dst, frame))
+
+    def forget_switch(self, dpid):
+        self.ready = False
+        self.ports.pop(dpid, None)
+        self.port_parts.pop(dpid, None)
+        self.links = {endpoint: peer for endpoint, peer in self.links.items()
+                      if endpoint[0] != dpid and peer[0] != dpid}
+        self.hosts = {mac: location for mac, location in self.hosts.items()
+                      if location[0] != dpid}
+
+    def on_port_description(self, sw, xid, body):
+        if len(body) < 8 or sw.dpid not in self.port_parts:
+            return
+        kind, flags = struct.unpack_from("!HH", body)
+        expected_xid, ports = self.port_parts[sw.dpid]
+        if kind != OFPMP_PORT_DESC or xid != expected_xid:
+            return
+        if (len(body) - 8) % 64:
+            raise ValueError("invalid port-description length")
+        for off in range(8, len(body), 64):
+            port = struct.unpack_from("!I", body, off)[0]
+            config, state = struct.unpack_from("!II", body, off + 32)
+            if 0 < port < 0xffffff00 and not (config & 1 or state & 1):
+                ports[port] = body[off + 8:off + 14]
+        if not flags & 1:
+            self.ports[sw.dpid] = ports
+            del self.port_parts[sw.dpid]
+            self.last_probe = 0.0
+            self.check_topology()
+
+    @staticmethod
+    def lldp_frame(dpid, port, mac):
+        chassis = b"\x07" + struct.pack("!Q", dpid)
+        port_id = b"\x07" + struct.pack("!I", port)
+        return (LLDP_DST_MAC + mac + struct.pack("!H", ETH_TYPE_LLDP)
+                + struct.pack("!H", (1 << 9) | len(chassis)) + chassis
+                + struct.pack("!H", (2 << 9) | len(port_id)) + port_id
+                + struct.pack("!HHH", (3 << 9) | 2, 120, 0))
+
+    @staticmethod
+    def parse_lldp(frame):
+        values = {}
+        off = 14
+        while off + 2 <= len(frame):
+            header = struct.unpack_from("!H", frame, off)[0]
+            kind, length = header >> 9, header & 0x1ff
+            off += 2
+            if off + length > len(frame):
+                return None
+            if kind == 0:
+                if length:
+                    return None
+                break
+            values[kind] = frame[off:off + length]
+            off += length
+        chassis, port = values.get(1, b""), values.get(2, b"")
+        if len(chassis) == 9 and len(port) == 5 and chassis[0] == port[0] == 7:
+            return struct.unpack("!Q", chassis[1:])[0], struct.unpack("!I", port[1:])[0]
+        return None
+
+    def discovery_tick(self):
+        now = time.monotonic()
+        while self.pending and now - self.pending[0][0] > 5:
+            self.pending.popleft()
+        if now - self.last_probe < 1:
+            return
+        self.last_probe = now
+        for dpid, ports in list(self.ports.items()):
+            sw = self.dpid_to_sw.get(dpid)
+            if sw is None:
+                continue
+            for port, mac in ports.items():
+                try:
+                    sw.send(OFPT_PACKET_OUT, build_packet_out(
+                        OFPP_CONTROLLER, port, self.lldp_frame(dpid, port, mac)))
+                except OSError:
+                    break
+
+    def graph(self):
+        graph = {dpid: {} for dpid in self.ports}
+        for (dpid, port), (peer, peer_port) in self.links.items():
+            if self.links.get((peer, peer_port)) == (dpid, port):
+                graph[dpid][peer] = port
+        return graph
+
+    def check_topology(self):
+        graph = self.graph()
+        complete = (len(graph) >= 3 and set(graph) == set(self.dpid_to_sw)
+                    and all(len(neighbors) == 2 for neighbors in graph.values()))
+        if complete:
+            seen = set()
+            queue = collections.deque([next(iter(graph))])
+            while queue:
+                node = queue.popleft()
+                if node not in seen:
+                    seen.add(node)
+                    queue.extend(graph[node])
+            complete = len(seen) == len(graph)
+        if complete and not self.ready:
+            self.ready = True
+            for dpid, port in self.links:
+                self.install_gate(self.dpid_to_sw[dpid], {OXM_OF_IN_PORT: port})
+            log.info("discovered complete ring: %d switches", len(graph))
+            for mac in self.hosts:
+                self.install_destination(mac)
+        elif not complete:
+            self.ready = False
+
+    def install_destination(self, mac):
+        target, host_port = self.hosts[mac]
+        graph = self.graph()
+        output = {target: host_port}
+        queue = collections.deque([target])
+        while queue:
+            node = queue.popleft()
+            for neighbor in sorted(graph[node]):
+                if neighbor not in output:
+                    output[neighbor] = graph[neighbor][node]
+                    queue.append(neighbor)
+        for dpid, port in output.items():
+            flow = build_flow_mod(10, {OXM_OF_ETH_DST: mac}, port)
+            self.dpid_to_sw[dpid].send(OFPT_FLOW_MOD, flow[:16] + b"\x01" + flow[17:])
+
+    def install_gate(self, sw, fields):
+        match = build_match(fields)
+        fixed = build_flow_mod(20, fields, OFPP_CONTROLLER)[:40]
+        sw.send(OFPT_FLOW_MOD, fixed + match + struct.pack("!HHB3x", 1, 8, 1))
+
+    def emit_to_host(self, dpid, port, frame):
+        self.dpid_to_sw[dpid].send(OFPT_PACKET_OUT, build_packet_out(
+            OFPP_CONTROLLER, port, frame))
+
+    def flush_pending(self, mac):
+        remaining = collections.deque(maxlen=self.pending.maxlen)
+        now = time.monotonic()
+        for timestamp, dst, frame in self.pending:
+            if now - timestamp <= 5:
+                if dst == mac:
+                    self.emit_to_host(*self.hosts[mac], frame)
+                else:
+                    remaining.append((timestamp, dst, frame))
+        self.pending = remaining
 
 
 

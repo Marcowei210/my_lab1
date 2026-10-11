@@ -1,0 +1,34 @@
+{
+  "mode": "normal",
+  "ping_count": 6,
+  "ping_loss_pct": 0,
+  "rtt_ms": [
+    0.754,
+    0.232,
+    0.897,
+    0.456,
+    0.434,
+    0.228
+  ],
+  "first_rtt_ratio": 1.737327188940092,
+  "leak_to_h3": 0,
+  "first_packet_leaked": false,
+  "openflow_flows": 1,
+  "fdb_entries": 2,
+  "dst_mapping": {},
+  "dst_mapping_truth": {
+    "00:00:00:00:00:01": 1,
+    "00:00:00:00:00:02": 2,
+    "00:00:00:00:00:03": 3
+  },
+  "dst_mapping_correct": false,
+  "packet_ins": 0,
+  "catchall_flows": [
+    "cookie=0x0, duration=4.057s, table=0, n_packets=14, n_bytes=1260, priority=0 actions=NORMAL"
+  ],
+  "controller_connected": false,
+  "flows_dump": [
+    "cookie=0x0, duration=4.057s, table=0, n_packets=14, n_bytes=1260, priority=0 actions=NORMAL"
+  ],
+  "h3_capture_lines": []
+}

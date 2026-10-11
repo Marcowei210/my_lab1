@@ -204,7 +204,9 @@ class Controller:
             Use a fresh xid (this is not a reply to theirs).
         T3a Immediately after, send OFPT_FEATURES_REQUEST: also header-only.
         """
-        raise NotImplementedError("T1 -- reply HELLO, then send FEATURES_REQUEST (T3a)")
+        # raise NotImplementedError("T1 -- reply HELLO, then send FEATURES_REQUEST (T3a)")
+        self.send(OFPT_HELLO)
+        self.send(OFPT_FEATURES_REQUEST)
 
     def on_echo_request(self, xid, body):
         """Keepalive (§7.5.4). OVS sends one every `inactivity_probe` ms and
@@ -212,7 +214,8 @@ class Controller:
 
         T2  Reply OFPT_ECHO_REPLY with the SAME xid and the SAME body.
         """
-        raise NotImplementedError("T2 -- reply ECHO_REPLY with the same xid and body")
+        # raise NotImplementedError("T2 -- reply ECHO_REPLY with the same xid and body")
+        self.send(OFPT_ECHO_REPLY, body, xid=xid)
 
     def on_features_reply(self, xid, body):
         """FEATURES_REPLY body (§7.3.1, struct ofp_switch_features, 24 bytes
@@ -223,7 +226,10 @@ class Controller:
         T3b Unpack it and remember self.dpid (log it as hex: OVS shows the same
             value in `ovs-ofctl show s1`).
         """
-        raise NotImplementedError("T3b -- unpack FEATURES_REPLY and set self.dpid")
+        self.dpid, n_buffers, n_tables, auxiliary_id, capabilities, reserved = struct.unpack(
+            "!QIBB2xII", body)
+        log.info("switch dpid=%016x", self.dpid)
+        # raise NotImplementedError("T3b -- unpack FEATURES_REPLY and set self.dpid")
         # Now that we know the switch, make sure unknown traffic reaches us:
         # a table-miss entry (priority 0, match everything, output CONTROLLER).
         self.send(OFPT_FLOW_MOD, self.build_flow_mod(
@@ -241,8 +247,13 @@ class Controller:
         T4  Unpack the 16 fixed bytes, call parse_match() on what follows, skip
             the 2 pad bytes, and return (buffer_id, in_port, frame_bytes).
         """
-        raise NotImplementedError("T4 -- unpack the PACKET_IN fixed fields, then the match, then the frame")
-
+        # raise NotImplementedError("T4 -- unpack the PACKET_IN fixed fields, then the match, then the frame")
+        buffer_id, total_len, reason, table_id, cookie = struct.unpack_from("!IHBBQ", body)
+        fields, end = self.parse_match(body, 16)
+        if OXM_OF_IN_PORT not in fields or end + 2 > len(body):
+            raise ValueError("PACKET_IN missing in_port or padding")
+        return buffer_id, fields[OXM_OF_IN_PORT], body[end + 2:]
+    
     def parse_match(self, buf, off):
         """OXM match (§7.2.3.1-7.2.3.3). struct ofp_match:
             uint16 type;      /* OFPMT_OXM = 1 */
@@ -260,14 +271,42 @@ class Controller:
             ({field: value_bytes, ...}, offset_just_after_the_padding).
             in_port is a 4-byte big-endian integer -- convert it.
         """
-        raise NotImplementedError("T5 -- walk the OXM TLVs and return ({field: value}, end_after_padding)")
+        # raise NotImplementedError("T5 -- walk the OXM TLVs and return ({field: value}, end_after_padding)")
+        match_type, length = struct.unpack_from("!HH", buf, off)
+        end = off + length
+        padded_end = off + ((length + 7) // 8) * 8
+        if match_type != OFPMT_OXM or length < 4 or padded_end > len(buf):
+            raise ValueError("invalid OXM match length or type")
+        fields = {}
+        pos = off + 4
+        while pos < end:
+            if pos + 4 > end:
+                raise ValueError("truncated OXM header")
+            oxm_class, field_mask, size = struct.unpack_from("!HBB", buf, pos)
+            pos += 4
+            if not size or pos + size > end:
+                raise ValueError("invalid OXM value length")
+            field = field_mask >> 1
+            value = buf[pos:pos + size]
+            if oxm_class == OFPXMC_OPENFLOW_BASIC:
+                if field == OXM_OF_IN_PORT:
+                    if size != 4 or field_mask & 1:
+                        raise ValueError("invalid in_port OXM")
+                    value = struct.unpack("!I", value)[0]
+                fields[field] = value
+            pos += size
+        return fields, padded_end
 
     @staticmethod
     def parse_ethernet(frame):
         """Ethernet II header, 14 bytes: dst MAC (6), src MAC (6), EtherType (2).
         T6  Return (dst_mac_str, src_mac_str, ethertype_int). Use mac_str().
         """
-        raise NotImplementedError("T6 -- split the 14-byte Ethernet header")
+        # raise NotImplementedError("T6 -- split the 14-byte Ethernet header")
+        if len(frame) < 14:
+            raise ValueError("truncated Ethernet header")
+        dst, src, ethertype = struct.unpack_from("!6s6sH", frame)
+        return mac_str(dst), mac_str(src), ethertype
 
     # ---- encoding --------------------------------------------------------
     @staticmethod
@@ -280,7 +319,16 @@ class Controller:
             thing with zero bytes to a multiple of 8. An empty dict is a
             "match everything" (length 4, padded to 8).
         """
-        raise NotImplementedError("T7a -- encode ofp_match with OXM TLVs, padded to 8 bytes")
+        # raise NotImplementedError("T7a -- encode ofp_match with OXM TLVs, padded to 8 bytes")
+        tlvs = b""
+        for field, value in sorted(fields.items()):
+            if isinstance(value, int):
+                value = struct.pack("!H" if field == OXM_OF_ETH_TYPE else "!I", value)
+            elif isinstance(value, str):
+                value = mac_bytes(value)
+            tlvs += struct.pack("!HBB", OFPXMC_OPENFLOW_BASIC, field << 1, len(value)) + value
+        length = 4 + len(tlvs)
+        return struct.pack("!HH", OFPMT_OXM, length) + tlvs + b"\x00" * (-length % 8)
 
     def build_flow_mod(self, priority, match_fields, out_port, max_len=0, idle_timeout=0,
                        command=OFPFC_ADD, delete_out_port=OFPP_ANY):
@@ -299,8 +347,18 @@ class Controller:
             fixed part are only used by DELETE (set OFPP_ANY / OFPG_ANY for ADD).
             The instruction's len covers itself plus its actions.
         """
-        raise NotImplementedError("T7b -- 40 fixed bytes + match + APPLY_ACTIONS instruction with one OUTPUT action")
-
+        # raise NotImplementedError("T7b -- 40 fixed bytes + match + APPLY_ACTIONS instruction with one OUTPUT action")
+        fixed = struct.pack("!QQBBHHHIIIH2x", 0, 0, 0, command,
+                            idle_timeout, 0, priority, OFP_NO_BUFFER,
+                            delete_out_port if command == OFPFC_DELETE else OFPP_ANY,
+                            OFPG_ANY, 0)
+        match = self.build_match(match_fields)
+        if command == OFPFC_DELETE:
+            return fixed + match
+        action = struct.pack("!HHIH6x", OFPAT_OUTPUT, 16, out_port, max_len)
+        instruction = struct.pack("!HH4x", OFPIT_APPLY_ACTIONS, 8 + len(action)) + action
+        return fixed + match + instruction
+    
     @staticmethod
     def build_packet_out(in_port, out_port, frame):
         """PACKET_OUT body (§7.3.7, struct ofp_packet_out):
@@ -309,8 +367,10 @@ class Controller:
         T8  buffer_id = OFP_NO_BUFFER (the frame travels inside this message),
             one OFPAT_OUTPUT action (16 bytes, max_len 0), then the frame.
         """
-        raise NotImplementedError("T8 -- 16 fixed bytes + one OUTPUT action + the frame")
-
+        # raise NotImplementedError("T8 -- 16 fixed bytes + one OUTPUT action + the frame")
+        action = struct.pack("!HHIH6x", OFPAT_OUTPUT, 16, out_port, 0)
+        return struct.pack("!IIH6x", OFP_NO_BUFFER, in_port, len(action)) + action + frame
+    
     # ---- the learning switch --------------------------------------------
     def on_packet_in(self, xid, body):
         """T9 -- the algorithm. Everything above exists so these ten lines can run:
@@ -324,7 +384,20 @@ class Controller:
             5. forward THIS frame with a PACKET_OUT -- the flow you just
                installed applies only to the next one.
         """
-        raise NotImplementedError("T9 -- decode, learn, decide, install, forward")
+        # raise NotImplementedError("T9 -- decode, learn, decide, install, forward")
+        buffer_id, in_port, frame = self.parse_packet_in(body)
+        dst, src, ethertype = self.parse_ethernet(frame)
+        if ethertype == ETH_TYPE_LLDP:
+            return
+        self.mac_to_port[src] = in_port
+        out_port = self.mac_to_port.get(dst, OFPP_FLOOD)
+        if out_port == in_port:
+            return
+        if out_port != OFPP_FLOOD:
+            self.send(OFPT_FLOW_MOD, self.build_flow_mod(
+                priority=10, match_fields={OXM_OF_ETH_DST: dst},
+                out_port=out_port, idle_timeout=60))
+        self.send(OFPT_PACKET_OUT, self.build_packet_out(in_port, out_port, frame))
 
 
 def main():

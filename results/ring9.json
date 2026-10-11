@@ -1,0 +1,36 @@
+{
+  "num_switches": 9,
+  "completed": true,
+  "datapaths": {
+    "1": "netdev",
+    "2": "netdev",
+    "3": "netdev",
+    "4": "netdev",
+    "5": "netdev",
+    "6": "netdev",
+    "7": "netdev",
+    "8": "netdev",
+    "9": "netdev"
+  },
+  "broadcast_probe_packets": 0,
+  "host_macs": {
+    "1": "00:00:00:00:00:01",
+    "2": "00:00:00:00:00:02",
+    "3": "00:00:00:00:00:03",
+    "4": "00:00:00:00:00:04",
+    "5": "00:00:00:00:00:05",
+    "6": "00:00:00:00:00:06",
+    "7": "00:00:00:00:00:07",
+    "8": "00:00:00:00:00:08",
+    "9": "00:00:00:00:00:09"
+  },
+  "directed_pairs": 72,
+  "online_failures": [],
+  "flows_checked": 72,
+  "path_errors": [],
+  "leaked_packets": 0,
+  "offline_flows_preserved": true,
+  "offline_failures": [],
+  "passed": 9,
+  "failed": 0
+}
